@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -456,7 +455,66 @@ def load_data():
         raise ValueError(f"Missing required columns: {missing}")
     return df
 
-@st.cache_resource(show_spinner="Training real-time risk model...")
+
+@st.cache_data(show_spinner="Preparing deployment scoring sample...")
+def load_scoring_sample(path_str, max_rows=120_000):
+    cols = MODEL_FEATURES + ["isFraud"]
+    fraud_parts = []
+    normal_parts = []
+    normal_target = max_rows - 8000
+
+    for chunk in pd.read_csv(
+        path_str,
+        usecols=cols,
+        chunksize=250_000,
+        low_memory=False,
+    ):
+        chunk = chunk.dropna(subset=["type"]).copy()
+
+        fraud = chunk[chunk["isFraud"] == 1]
+        if len(fraud):
+            fraud_parts.append(fraud)
+
+        normal = chunk[chunk["isFraud"] == 0]
+        if len(normal_parts) < 20 and len(normal):
+            take = min(
+                len(normal),
+                max(1, normal_target // 20)
+            )
+            normal_parts.append(
+                normal.sample(n=take, random_state=42)
+            )
+
+    fraud_df = (
+        pd.concat(fraud_parts, ignore_index=True)
+        if fraud_parts else pd.DataFrame(columns=cols)
+    )
+    normal_df = (
+        pd.concat(normal_parts, ignore_index=True)
+        if normal_parts else pd.DataFrame(columns=cols)
+    )
+
+    if len(normal_df) > normal_target:
+        normal_df = normal_df.sample(
+            n=normal_target,
+            random_state=42
+        )
+
+    sample = pd.concat(
+        [fraud_df, normal_df],
+        ignore_index=True
+    )
+
+    if len(sample) > max_rows:
+        sample = sample.sample(
+            n=max_rows,
+            random_state=42
+        )
+
+    return sample.reset_index(drop=True)
+
+
+@st.cache_resource(show_spinner="Training compact deployment model...")
 def train_model(data):
     X = data[MODEL_FEATURES].copy()
     y = data["isFraud"].copy()
@@ -468,14 +526,6 @@ def train_model(data):
     y_train = y.iloc[:split_point]
     y_test = y.iloc[split_point:]
 
-    categorical = ["type"]
-    numeric = [
-        "step",
-        "amount",
-        "oldbalanceOrg",
-        "oldbalanceDest",
-    ]
-
     preprocessor = ColumnTransformer(
         transformers=[
             (
@@ -484,12 +534,12 @@ def train_model(data):
                     ("imputer", SimpleImputer(strategy="median")),
                     ("scaler", StandardScaler()),
                 ]),
-                numeric,
+                ["step", "amount", "oldbalanceOrg", "oldbalanceDest"],
             ),
             (
                 "cat",
                 OneHotEncoder(handle_unknown="ignore"),
-                categorical,
+                ["type"],
             ),
         ]
     )
@@ -499,9 +549,9 @@ def train_model(data):
         (
             "classifier",
             RandomForestClassifier(
-                n_estimators=200,
-                max_depth=12,
-                min_samples_leaf=5,
+                n_estimators=80,
+                max_depth=10,
+                min_samples_leaf=8,
                 class_weight="balanced",
                 n_jobs=-1,
                 random_state=42,
@@ -511,14 +561,17 @@ def train_model(data):
 
     model.fit(X_train, y_train)
 
-    prob = model.predict_proba(X_test)[:, 1]
-
     test = X_test.reset_index(drop=True).copy()
     test["actual_fraud"] = y_test.reset_index(drop=True).to_numpy()
-    test["fraud_probability"] = prob
-    test["transaction_amount"] = data.iloc[split_point:]["amount"].reset_index(drop=True)
+    test["fraud_probability"] = model.predict_proba(X_test)[:, 1]
+    test["transaction_amount"] = (
+        data.iloc[split_point:]["amount"]
+        .reset_index(drop=True)
+        .to_numpy()
+    )
 
     return model, test, split_point
+
 
 def risk_level(prob):
     if prob >= FINAL_THRESHOLD:
@@ -528,6 +581,7 @@ def risk_level(prob):
     if prob >= 0.30:
         return "MEDIUM"
     return "LOW"
+
 
 def metric(col, label, value, note):
     col.markdown(
@@ -542,11 +596,6 @@ def metric(col, label, value, note):
         unsafe_allow_html=True,
     )
 
-@st.cache_data
-def build_risk_table(test):
-    result = test.copy()
-    result["risk_level"] = result["fraud_probability"].apply(risk_level)
-    return result
 
 try:
     if not DATA_PATH.exists():
@@ -556,9 +605,10 @@ try:
         )
         st.stop()
 
-    df = load_data()
-    model, scored_test, split_point = train_model(df)
-    risk_df = build_risk_table(scored_test)
+    sample_df = load_scoring_sample(str(DATA_PATH))
+    model, scored_test, split_point = train_model(sample_df)
+    risk_df = scored_test.copy()
+    risk_df["risk_level"] = risk_df["fraud_probability"].apply(risk_level)
 
 except Exception as exc:
     st.error(f"Application initialization failed: {exc}")
@@ -568,11 +618,11 @@ except Exception as exc:
 # GLOBAL METRICS
 # ============================================================
 
-total_tx = len(df)
-fraud_tx = int(df["isFraud"].sum())
-fraud_rate = fraud_tx / total_tx if total_tx else 0
-total_value = float(df["amount"].sum())
-fraud_value = float(df.loc[df["isFraud"] == 1, "amount"].sum())
+FULL_TOTAL_TX = 6_362_620
+FULL_FRAUD_TX = 8_213
+FULL_FRAUD_RATE = 0.001291
+FULL_TOTAL_VALUE = 1_144_392_944_759.77
+FULL_FRAUD_VALUE = 12_056_415_427.84
 
 critical = risk_df[risk_df["risk_level"] == "CRITICAL"]
 high = risk_df[risk_df["risk_level"] == "HIGH"]
@@ -619,9 +669,9 @@ st.sidebar.markdown(
     f"""
     <div style="font-size:.81rem;line-height:1.72;color:#C4C9CC;">
         <b style="color:#fff;">Dataset</b><br>
-        {total_tx:,} transactions<br><br>
+        {len(sample_df):,} scoring rows<br><br>
         <b style="color:#fff;">Fraud rate</b><br>
-        {fraud_rate:.4%}<br><br>
+        {FULL_FRAUD_RATE:.4%}<br><br>
         <b style="color:#fff;">Model</b><br>
         Real-time Random Forest<br><br>
         <b style="color:#fff;">High-confidence threshold</b><br>
@@ -653,6 +703,7 @@ if page == "Executive Command Center":
                 <span class="hero-pill">0.1291% observed fraud rate</span>
                 <span class="hero-pill">PR-AUC 0.5000</span>
                 <span class="hero-pill">Real-time feature set</span>
+        <span class="hero-pill">Cloud-safe scoring sample</span>
             </div>
         </div>
         """,
@@ -661,9 +712,9 @@ if page == "Executive Command Center":
 
     cols = st.columns(5)
 
-    metric(cols[0], "Transactions", f"{total_tx/1e6:.2f}M", "Full PaySim population")
-    metric(cols[1], "Fraud rate", f"{fraud_rate:.4%}", "Rare-event problem")
-    metric(cols[2], "Fraud value", f"{fraud_value/1e9:.2f}B", "Observed fraud exposure")
+    metric(cols[0], "Transactions", f"{FULL_TOTAL_TX/1e6:.2f}M", "Full PaySim population")
+    metric(cols[1], "Fraud rate", f"{FULL_FRAUD_RATE:.4%}", "Rare-event problem")
+    metric(cols[2], "Fraud value", f"{FULL_FRAUD_VALUE/1e9:.2f}B", "Observed fraud exposure")
     metric(cols[3], "Critical alerts", f"{critical_count:,}", "High-confidence queue")
     metric(cols[4], "Critical value", f"{critical_value/1e9:.2f}B", "Value represented by critical alerts")
 
