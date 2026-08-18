@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -848,7 +849,7 @@ if page == "Executive Command Center":
     )
 
     fraud_type = (
-        df[df["isFraud"] == 1]
+        sample_df[sample_df["isFraud"] == 1]
         .groupby("type")
         .agg(
             Fraud_Count=("isFraud","count"),
@@ -933,12 +934,12 @@ elif page == "Risk Explorer":
     with c2:
         chosen_types = st.multiselect(
             "Transaction type",
-            sorted(df["type"].unique()),
-            default=sorted(df["type"].unique()),
+            sorted(sample_df["type"].unique()),
+            default=sorted(sample_df["type"].unique()),
         )
 
     with c3:
-        amount_max = int(df["amount"].quantile(.995))
+        amount_max = int(sample_df["amount"].quantile(.995))
         amount_range = st.slider(
             "Amount range",
             0,
@@ -1192,34 +1193,34 @@ elif page == "Transaction Simulator":
     with left:
         tx_type = st.selectbox(
             "Transaction type",
-            sorted(df["type"].unique()),
+            sorted(sample_df["type"].unique()),
         )
 
         amount = st.number_input(
             "Transaction amount",
             min_value=0.0,
-            value=float(df["amount"].median()),
+            value=float(sample_df["amount"].median()),
             step=1000.0,
         )
 
         old_origin = st.number_input(
             "Origin account balance",
             min_value=0.0,
-            value=float(df["oldbalanceOrg"].median()),
+            value=float(sample_df["oldbalanceOrg"].median()),
             step=1000.0,
         )
 
         old_dest = st.number_input(
             "Destination account balance",
             min_value=0.0,
-            value=float(df["oldbalanceDest"].median()),
+            value=float(sample_df["oldbalanceDest"].median()),
             step=1000.0,
         )
 
         step_value = st.number_input(
             "Transaction step / time index",
             min_value=0,
-            value=int(df["step"].median()),
+            value=int(sample_df["step"].median()),
             step=1,
         )
 
@@ -1360,8 +1361,8 @@ elif page == "Investigation Queue":
     with c2:
         queue_type = st.multiselect(
             "Transaction type",
-            sorted(df["type"].unique()),
-            default=sorted(df["type"].unique()),
+            sorted(sample_df["type"].unique()),
+            default=sorted(sample_df["type"].unique()),
             key="queue_type",
         )
 
